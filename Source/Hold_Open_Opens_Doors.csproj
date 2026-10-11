@@ -57,11 +57,6 @@
       <TargetPath>..\$([System.String]::new('%(RelativeDir)').Substring(3))%(Filename)%(Extension)</TargetPath>
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </ContentWithTargetPath>
-    <ContentWithTargetPath Include="..\About\About-*.xml">
-      <Link>About\%(RecursiveDir)%(Filename)%(Extension)</Link>
-      <TargetPath Condition="'About-$(Configuration)'==%(Filename)">..\About\About.xml</TargetPath>
-      <CopyToOutputDirectory Condition="'About-$(Configuration)'==%(Filename)">Always</CopyToOutputDirectory>
-    </ContentWithTargetPath>
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <PropertyGroup>
