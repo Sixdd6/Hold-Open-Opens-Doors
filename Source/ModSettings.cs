@@ -1,208 +1,154 @@
-﻿using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Reflection;
-using HugsLib;
-using HugsLib.Settings;
+using HarmonyLib;
 using RimWorld;
+using UnityEngine;
 using Verse;
 
 namespace HOOD
 {
-    public class HOODSettings : ModBase
+    // Values saved to the mod settings file
+    public class HOODSettingsData : ModSettings
     {
-        private const string mModIdentifier = "Hold_Open_Opens_Doors";
+        public bool checkPower = true;
+        public bool disableOnDoors = false;
+        public bool enableLogging = false;
 
-        private readonly List<SettingHandle<bool>> settingsList = new List<SettingHandle<bool>>();
+        // Door defName => whether the door is excluded from instant opening/closing.
+        // A door with no entry uses its default (see HOODSettings.DefaultDisallowed).
+        public Dictionary<string, bool> doors = new Dictionary<string, bool>();
+
+        public override void ExposeData()
+        {
+            Scribe_Values.Look(ref checkPower, "checkPower", true);
+            Scribe_Values.Look(ref disableOnDoors, "disableOnDoors", false);
+            Scribe_Values.Look(ref enableLogging, "enableLogging", false);
+            Scribe_Collections.Look(ref doors, "doors", LookMode.Value, LookMode.Value);
+            if (Scribe.mode == LoadSaveMode.PostLoadInit && doors == null)
+                doors = new Dictionary<string, bool>();
+        }
+    }
+
+    // Runtime state read by the door patches
+    public static class HOODSettings
+    {
         public static List<string> disallowedDoors = new List<string>();
         public static bool disableOnDoors = false;
         public static bool checkPower = true;
 
-        public override string ModIdentifier => mModIdentifier;
+        // Door defs found at startup; filled by DoorScanner
+        public static List<ThingDef> doorDefs = new List<ThingDef>();
 
-        // Main entry point for main menu
-        public override void DefsLoaded()
+        // Powered doors are excluded by default
+        public static bool DefaultDisallowed(ThingDef def) => def.HasComp(typeof(CompPower));
+
+        public static bool IsDisallowed(HOODSettingsData data, ThingDef def)
         {
-            UpdateEnableLogging(); // Do first so all the code logs before all the settings are loaded normally
-            SetTitle();
-            L.Log("Settings populating...");
-            PopulateSettings(GetDoorBuildings());
-            UpdateSettings();
+            return data.doors.TryGetValue(def.defName, out bool value) ? value : DefaultDisallowed(def);
         }
 
-        // Set the settings title
-        private void SetTitle()
+        // Copy the saved values into the fields the patches read
+        public static void Apply()
         {
-            Settings.EntryName = "Hold Open Opens Doors";
+            var data = HOODMod.Data;
+            if (data == null) return;
+
+            checkPower = data.checkPower;
+            disableOnDoors = data.disableOnDoors;
+            L.loggingEnabled = data.enableLogging;
+            disallowedDoors = doorDefs.Where(def => IsDisallowed(data, def)).Select(def => def.defName).ToList();
+
+            L.Log("Settings applied: checkPower (" + checkPower + ") - disableOnDoors (" + disableOnDoors
+                + ") - disallowedDoors (" + string.Join(",", disallowedDoors) + ")");
+        }
+    }
+
+    // Finds the doors once all defs are loaded (replaces HugsLib's DefsLoaded)
+    [StaticConstructorOnStartup]
+    static class DoorScanner
+    {
+        static DoorScanner()
+        {
+            HOODSettings.doorDefs = FindDoors();
+            HOODSettings.Apply();
         }
 
-        // Populate the settings menu with items, includings doors from core and mods
-        private void PopulateSettings(List<ThingDef> things)
+        // A door is any building whose class has a holdOpenInt field (vanilla and modded doors)
+        private static List<ThingDef> FindDoors()
         {
-            Settings.GetHandle("CheckPower", "Enable power check", "When enabled this checks that the door has power to open/close (for added realism)", true);
-            Settings.GetHandle("DisableOnDoors", "Disable on selected doors", "When enabled this stops immediate opening/closing on the selected doors below (for added realism)", false);
-            Settings.GetHandle("EnableLogging", "Enable logging", "Enable logging", false);
-
-            foreach (ThingDef thing in things)
-            {
-                string className = thing.ToString();
-                bool enabled = false;
-                //if (className.Equals("Door")) enabled = true; // Pre set door to be disabled for realism
-
-                if (thing.HasComp(typeof(CompPower))) enabled = true; // Pre set door to be enabled by default in list if it has power
-
-                // Don't add Jecrells invisible door to the settings, but keep it in the list of doors for actioning
-                if (!thing.label.ToLower().Equals("invisible door"))
-                {
-                    // Display name
-                    string displayName = thing.label;
-                    string description = thing.description;
-
-                    settingsList.Add(Settings.GetHandle(className, displayName, description, enabled));
-                }
-            }
-
-            L.Log("Settings populated!");
-        }
-
-        // Update the enable logging flag, and also the Logger
-        private void UpdateEnableLogging()
-        {
-            Settings.GetHandle("EnableLogging", "Enable logging", "Enable logging", false); // set up the item before grabbing it, need to setup correctly
-            SettingHandle<bool> newEnableLogging = Settings.GetHandle<bool>("EnableLogging");
-            if (newEnableLogging != null) L.loggingEnabled = newEnableLogging.Value;
-        }
-
-        // Update the settings to reflect the new values, this then updates the list of disallowed doors
-        private void UpdateSettings()
-        {
-            L.Log("Settings updating...");
-
-            SettingHandle<bool> newCheckPower = Settings.GetHandle<bool>("CheckPower");
-            if(newCheckPower != null) checkPower = newCheckPower.Value;
-            SettingHandle<bool> newDisableOnDoors = Settings.GetHandle<bool>("DisableOnDoors");
-            if(newDisableOnDoors != null) disableOnDoors = newDisableOnDoors.Value;
-            UpdateEnableLogging();
-
-            UpdateDisallowedDoors();
-
-            L.Log("Settings updated!");
-        }
-
-        // Update the list of disallowed doors to contain the selected doors
-        private void UpdateDisallowedDoors()
-        {
-            IEnumerable<SettingHandle<bool>> disallowedDoorSettings = settingsList.Where(s => s != null && s.Value == true);
-            List<string> disallowedDoorList = new List<string>();
-
-            foreach(SettingHandle<bool> disallowedDoorSetting in disallowedDoorSettings)
-            {
-                string name = disallowedDoorSetting.Name;
-
-                disallowedDoorList.Add(name);
-            }
-
-            disallowedDoors = disallowedDoorList;
-        }
-
-        // Get all the door buildings from core, and from mods
-        private List<ThingDef> GetDoorBuildings()
-        {
-            // Get all buildings, filter down as much as possible to find buildings that 'may' be doors
-            IEnumerable<ThingDef> thingDefs = DefDatabase<ThingDef>.AllDefs.Where<ThingDef>(def => def != null && def.building != null
-            && !def.IsBlueprint
-            && !def.IsFrame
-            && !def.IsMeat
-            && !def.IsWeapon
-            && !def.IsMeleeWeapon
-            && !def.IsWeaponUsingProjectiles
-            && !def.IsRangedWeapon
-            && !def.IsApparel
-            && !def.IsDrug
-            && !def.IsPleasureDrug
-            && !def.IsAddictiveDrug
-            && !def.IsNonMedicalDrug
-            && !def.IsStuff
-            && !def.IsTable
-            && !def.IsWorkTable
-            && !def.IsMedicine
-            && !def.IsIngestible
-            && !def.IsCorpse
-            && !def.IsCommsConsole
-            && !def.IsBed
-            && !def.IsArt
-            && !def.IsFilth
-            && !def.IsFoodDispenser
-            && !def.IsLeather
-            && !def.IsMetal
-            && !def.IsNutritionGivingIngestible
-            && !def.IsShell
-            && !def.IsSmoothable
-            && !def.IsSmoothed
-            && !def.EverHaulable
-            // Building checks
-            && !def.building.SupportsPlants
-            && !def.building.isSittable // Chairs I guess
-            && def.building.canPlaceOverWall // doors can be placed over walls, not much else can
-            );
-
             L.Log("Finding doors...");
 
-            List<ThingDef> doors = new List<ThingDef>();
-            foreach (ThingDef thingDef in thingDefs)
+            var doors = new List<ThingDef>();
+            foreach (ThingDef def in DefDatabase<ThingDef>.AllDefs)
             {
-                if(thingDef.building != null && thingDef.thingClass != null)
-                {
-                    Type thingDefType = thingDef.building.GetType();
+                if (def.building == null || def.thingClass == null) continue;
+                if (AccessTools.Field(def.thingClass, "holdOpenInt") == null) continue;
 
-                    Thing thing = (Thing)Activator.CreateInstance(thingDef.thingClass);
+                // Jecrell's invisible door is actioned like any other door, but it has no useful entry in the settings
+                if (def.label != null && def.label.ToLower().Equals("invisible door")) continue;
 
-                    FieldInfo prop = thing.GetType().GetField("holdOpenInt", BindingFlags.NonPublic | BindingFlags.Instance);
-                    if (prop == null) prop = thing.GetType().BaseType.GetField("holdOpenInt", BindingFlags.NonPublic | BindingFlags.Instance); // Try the base type
-
-                    if (prop != null || thingDef.defName.Equals("HeronInvisibleDoor"))
-                    {
-                        string ohMy = "";
-                        if (thingDef.defName.Equals("HeronInvisibleDoor"))
-                            ohMy = " (invisible door handler? Let's dance...!) ";
-
-                        L.Log("Found a door - " + thingDef.label + " in the assembly " + thingDef.thingClass + ohMy);
-                        doors.Add(thingDef);
-                    }
-                }
+                L.Log("Found a door - " + def.label + " in the assembly " + def.thingClass);
+                doors.Add(def);
             }
 
-            // Log door count
-            LogDoorCount(doors.Count);
-
+            L.Log("Found " + doors.Count + " doors");
             return doors;
         }
+    }
 
-        // Log the door count with some flavour
-        private static void LogDoorCount(int doorCount)
+    // Mod entry point and settings window (replaces HugsLib's ModBase)
+    public class HOODMod : Mod
+    {
+        public static HOODSettingsData Data;
+
+        private Vector2 scrollPosition;
+        private float viewHeight = 1000f;
+
+        public HOODMod(ModContentPack content) : base(content)
         {
-            if (L.loggingEnabled)
-            {
-                string suffix;
-                if (doorCount == 0)
-                    suffix = "not even one door? That's not good! Scrambling fairies...! j/k I don't have the budget for that, check your mod load order broseph";
-                else if (doorCount < 3)
-                    suffix = "tastes like vanilla!";
-                else if (doorCount < 7)
-                    suffix = "phew!";
-                else
-                    suffix = "I also like to live dangerously!";
-
-                L.Log("Found " + doorCount + " doors..." + suffix);
-            }
+            Data = GetSettings<HOODSettingsData>();
         }
 
-        // Settings changed event handler
-        public override void SettingsChanged()
-        {
-            base.SettingsChanged();
+        public override string SettingsCategory() => "Hold Open Opens Doors";
 
-            UpdateSettings();
+        public override void DoSettingsWindowContents(Rect inRect)
+        {
+            var doors = HOODSettings.doorDefs;
+            var viewRect = new Rect(0f, 0f, inRect.width - 20f, viewHeight);
+            Widgets.BeginScrollView(inRect, ref scrollPosition, viewRect);
+
+            var listing = new Listing_Standard();
+            listing.Begin(viewRect);
+
+            listing.CheckboxLabeled("Enable power check", ref Data.checkPower,
+                "When enabled this checks that the door has power to open/close (for added realism)");
+            listing.CheckboxLabeled("Disable on selected doors", ref Data.disableOnDoors,
+                "When enabled this stops immediate opening/closing on the selected doors below (for added realism)");
+            listing.CheckboxLabeled("Enable logging", ref Data.enableLogging, "Write debug messages to the log");
+
+            listing.GapLine();
+            listing.Label("Selected doors (only used when \"Disable on selected doors\" is on):");
+            if (doors.Count == 0)
+                listing.Label("No doors found.");
+
+            foreach (ThingDef def in doors.OrderBy(d => d.label))
+            {
+                bool disallowed = HOODSettings.IsDisallowed(Data, def);
+                bool before = disallowed;
+                listing.CheckboxLabeled(def.LabelCap, ref disallowed, def.description);
+                if (disallowed != before)
+                    Data.doors[def.defName] = disallowed;
+            }
+
+            viewHeight = listing.CurHeight;
+            listing.End();
+            Widgets.EndScrollView();
+        }
+
+        public override void WriteSettings()
+        {
+            base.WriteSettings();
+            HOODSettings.Apply();
         }
     }
 }
